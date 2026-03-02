@@ -1,177 +1,262 @@
-"use client";
-import { useState, useEffect } from "react";
+'use client';
 
-const API_URL = "http://localhost:8000";
+import * as React from 'react';
 
-interface Document {
+type Row = {
   id: string;
-  title: string;
-  description: string;
-  file_type: string;
-  source: string;
-  status: string;
-  tags: string;
-  created_at: string;
-}
-
-const statusColors: Record<string, string> = {
-  pending:  "bg-yellow-500/20 text-yellow-400",
-  verified: "bg-green-500/20 text-green-400",
-  disputed: "bg-orange-500/20 text-orange-400",
-  rejected: "bg-red-500/20 text-red-400",
-};
-
-const statusLabels: Record<string, string> = {
-  pending:  "⏳ Ожидает",
-  verified: "✅ Проверен",
-  disputed: "⚠️ Спорный",
-  rejected: "❌ Отклонён",
+  relPath: string;
+  absPath: string;
+  name: string;
+  ext: string;
+  size: number;
+  sha256: string;
+  status: 'OK' | 'EMPTY' | 'TOO_LARGE' | 'UNSUPPORTED_EXT' | 'DUPLICATE';
+  duplicateOf?: string;
 };
 
 export default function LibraryPage() {
-  const [documents, setDocuments] = useState<Document[]>([]);
-  const [uploading, setUploading] = useState(false);
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [tags, setTags] = useState("");
-  const [file, setFile] = useState<File | null>(null);
-  const [error, setError] = useState("");
+  const [loading, setLoading] = React.useState(false);
+  const [err, setErr] = React.useState('');
+  const [root, setRoot] = React.useState('');
+  const [rows, setRows] = React.useState<Row[]>([]);
+  const [q, setQ] = React.useState('');
+  const [filter, setFilter] = React.useState<'ALL' | 'ONLY_OK' | 'ONLY_PROBLEMS'>('ALL');
+  const [selected, setSelected] = React.useState<Record<string, boolean>>({});
+  const [savedMsg, setSavedMsg] = React.useState('');
 
-  const fetchDocuments = async () => {
+  const fmtSize = (n: number) => {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  const badgeClass = (s: Row['status']) => {
+    if (s === 'OK') return 'bg-green-900 text-green-300 border-green-700 px-2 py-1 rounded-full text-xs font-medium';
+    if (s === 'DUPLICATE') return 'bg-yellow-900 text-yellow-300 border-yellow-700 px-2 py-1 rounded-full text-xs font-medium';
+    return 'bg-red-900 text-red-300 border-red-700 px-2 py-1 rounded-full text-xs font-medium';
+  };
+
+  const scan = async () => {
+    setLoading(true);
+    setErr('');
     try {
-      const res = await fetch(`${API_URL}/api/documents/`);
+      const res = await fetch('/api/validation/scan', { cache: 'no-store' });
       const data = await res.json();
-      setDocuments(data);
-    } catch (e) {
-      console.error("Ошибка загрузки документов:", e);
-    }
-  };
+      if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+      
+      setRoot(data.root || '');
+      setRows(data.rows || []);
 
-  useEffect(() => { fetchDocuments(); }, []);
-
-  const handleUpload = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!file || !title) return;
-    setUploading(true);
-    setError("");
-    try {
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("title", title);
-      formData.append("description", description);
-      formData.append("tags", tags);
-      const res = await fetch(`${API_URL}/api/documents/upload`, {
-        method: "POST",
-        body: formData,
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        setError(err.detail || "Ошибка загрузки");
-      } else {
-        setTitle("");
-        setDescription("");
-        setTags("");
-        setFile(null);
-        fetchDocuments();
+      // Автовыбор OK файлов
+      const nextSel: Record<string, boolean> = {};
+      for (const r of data.rows || []) {
+        if (r.status === 'OK') nextSel[r.relPath] = true;
       }
-    } catch (e) {
-      setError("Не удалось подключиться к серверу");
+      setSelected(nextSel);
+    } catch (e: any) {
+      setErr(e?.message ?? String(e));
+    } finally {
+      setLoading(false);
     }
-    setUploading(false);
   };
 
-  const handleDelete = async (id: string) => {
-    await fetch(`${API_URL}/api/documents/${id}`, { method: "DELETE" });
-    fetchDocuments();
+  const toggle = (relPath: string) => {
+    setSelected(prev => ({ ...prev, [relPath]: !prev[relPath] }));
   };
+
+  const saveManifest = async () => {
+    setLoading(true);
+    try {
+      const selectedList = Object.entries(selected).filter(([,v]) => v).map(([k]) => k);
+      
+      const res = await fetch('/api/validation/manifest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ selected: selectedList })
+      });
+      
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error);
+      
+      setSavedMsg(`✅ Сохранено: ${data.saved?.selected_count} файлов в ${data.manifestPath}`);
+    } catch (e: any) {
+      setErr(e?.message ?? String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const stats = React.useMemo(() => {
+    const by: Record<string, number> = {};
+    for (const r of rows) by[r.status] = (by[r.status] || 0) + 1;
+    const selectedCount = Object.values(selected).filter(Boolean).length;
+    return { by, selectedCount, total: rows.length };
+  }, [rows, selected]);
+
+  const visibleRows = React.useMemo(() => {
+    let out = rows;
+    if (filter === 'ONLY_OK') out = out.filter(r => r.status === 'OK');
+    if (filter === 'ONLY_PROBLEMS') out = out.filter(r => r.status !== 'OK');
+    if (q.trim()) {
+      const qq = q.toLowerCase();
+      out = out.filter(r => 
+        r.relPath.toLowerCase().includes(qq) || 
+        r.name.toLowerCase().includes(qq)
+      );
+    }
+    return out.sort((a, b) => a.relPath.localeCompare(b.relPath));
+  }, [rows, filter, q]);
 
   return (
-    <div className="max-w-5xl">
-      <h1 className="text-3xl font-bold text-white mb-2">📚 Библиотека данных</h1>
-      <p className="text-gray-400 mb-6">Нормативы, стандарты и технические документы</p>
-
-      {/* Форма загрузки */}
-      <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 mb-6">
-        <h2 className="text-lg font-semibold text-white mb-4">Загрузить документ</h2>
-        <form onSubmit={handleUpload} className="space-y-3">
-          <input
-            type="text"
-            placeholder="Название документа *"
-            value={title}
-            onChange={e => setTitle(e.target.value)}
-            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-white text-sm focus:outline-none focus:border-blue-500"
-            required
-          />
-          <input
-            type="text"
-            placeholder="Описание"
-            value={description}
-            onChange={e => setDescription(e.target.value)}
-            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-white text-sm focus:outline-none focus:border-blue-500"
-          />
-          <input
-            type="text"
-            placeholder="Теги через запятую: ГОСТ, IEC, выпрямитель"
-            value={tags}
-            onChange={e => setTags(e.target.value)}
-            className="w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-white text-sm focus:outline-none focus:border-blue-500"
-          />
-          <div className="flex gap-3">
-            <input
-              type="file"
-              accept=".pdf,.docx,.txt"
-              onChange={e => setFile(e.target.files?.[0] || null)}
-              className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-gray-400 text-sm"
-            />
-            <button
-              type="submit"
-              disabled={uploading || !file || !title}
-              className="px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg text-sm font-medium transition-colors"
-            >
-              {uploading ? "Загрузка..." : "Загрузить"}
-            </button>
-          </div>
-          {error && <p className="text-red-400 text-sm">{error}</p>}
-        </form>
+    <div className="max-w-6xl mx-auto p-8">
+      <div className="flex items-center justify-between mb-8">
+        <div>
+          <h1 className="text-3xl font-bold text-white mb-2">📚 Библиотека файлов</h1>
+          <p className="text-gray-400">Валидация собранных файлов + формирование корректной выборки</p>
+        </div>
+        <button
+          onClick={scan}
+          disabled={loading}
+          className="bg-blue-600 hover:bg-blue-500 disabled:bg-blue-900 text-white px-8 py-3 rounded-xl font-semibold text-lg shadow-lg flex items-center gap-2"
+        >
+          {loading ? (
+            <>
+              <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              Сканирую...
+            </>
+          ) : (
+            '🔍 Сканировать библиотеку'
+          )}
+        </button>
       </div>
 
-      {/* Список документов */}
-      <div className="space-y-3">
-        {documents.length === 0 ? (
-          <div className="text-center py-12 text-gray-500">
-            Библиотека пуста. Загрузите первый документ.
+      {root && (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 mb-6">
+          <div className="text-sm text-gray-400">📁 Папка библиотеки: <code className="bg-gray-800 px-3 py-1 rounded font-mono text-sm text-white">{root}</code></div>
+        </div>
+      )}
+
+      {err && (
+        <div className="bg-red-900/50 border border-red-700 text-red-200 p-6 rounded-xl mb-6">
+          <div className="font-semibold mb-2">❌ Ошибка:</div>
+          <code className="text-sm">{err}</code>
+        </div>
+      )}
+
+      {savedMsg && (
+        <div className="bg-green-900/50 border border-green-700 text-green-200 p-6 rounded-xl mb-6">
+          <div className="font-semibold">✅ {savedMsg}</div>
+        </div>
+      )}
+
+      <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 mb-6">
+        <div className="flex flex-wrap items-center gap-4 text-sm mb-4">
+          <span>Всего файлов: <span className="text-white font-semibold">{stats.total}</span></span>
+          <span>✓ OK: <span className="text-green-400 font-semibold">{stats.by?.OK || 0}</span></span>
+          <span>📋 Выбрано: <span className="text-white font-semibold">{stats.selectedCount}</span></span>
+          <span>Дубли: <span className="text-yellow-400 font-semibold">{stats.by?.DUPLICATE || 0}</span></span>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <input
+            value={q}
+            onChange={e => setQ(e.target.value)}
+            placeholder="🔎 Поиск по имени или пути..."
+            className="bg-gray-800 border border-gray-700 text-white px-4 py-2 rounded-lg w-72 focus:outline-none focus:border-blue-500"
+          />
+          <select
+            value={filter}
+            onChange={e => setFilter(e.target.value as any)}
+            className="bg-gray-800 border border-gray-700 text-white px-4 py-2 rounded-lg focus:outline-none"
+          >
+            <option value="ALL">Показать все файлы</option>
+            <option value="ONLY_OK">Только OK файлы</option>
+            <option value="ONLY_PROBLEMS">Только проблемные</option>
+          </select>
+          <button
+            onClick={() => {
+              const nextSel: Record<string, boolean> = {};
+              for (const r of rows) if (r.status === 'OK') nextSel[r.relPath] = true;
+              setSelected(nextSel);
+            }}
+            className="bg-gray-700 hover:bg-gray-600 text-white px-6 py-2 rounded-lg border border-gray-600 font-medium"
+          >
+            Автовыбор OK
+          </button>
+          <button
+            onClick={() => setSelected({})}
+            className="bg-gray-700 hover:bg-gray-600 text-white px-6 py-2 rounded-lg border border-gray-600 font-medium"
+          >
+            Очистить выбор
+          </button>
+          <button
+            onClick={saveManifest}
+            disabled={loading || Object.values(selected).filter(Boolean).length === 0}
+            className="bg-green-600 hover:bg-green-500 disabled:bg-green-900 text-white px-8 py-2 rounded-lg font-semibold shadow-lg flex items-center gap-2 disabled:shadow-none"
+          >
+            💾 Сохранить выборку
+          </button>
+        </div>
+      </div>
+
+      <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
+        <div className="grid grid-cols-1 lg:grid-cols-6 bg-gray-950/50 px-6 py-4 text-sm font-semibold text-gray-300 border-b border-gray-800">
+          <span className="flex items-center justify-center">☑️</span>
+          <span>Файл</span>
+          <span>Размер</span>
+          <span>Статус</span>
+          <span className="text-center">📥</span>
+          <span>Проблема</span>
+        </div>
+        
+        {visibleRows.length === 0 ? (
+          <div className="p-16 text-center text-gray-500">
+            <div className="text-6xl mb-6 opacity-50">📂</div>
+            <p className="text-xl mb-4">Файлы из библиотеки не найдены</p>
+            <p className="text-lg mb-8">Нажми "🔍 Сканировать библиотеку" чтобы начать валидацию</p>
+            <p className="text-sm opacity-75">
+              Проверь, что папка <code className="bg-gray-800 px-2 py-1 rounded text-xs font-mono">/Users/vasilii/Desktop/rectifier-env/library</code> содержит PDF, DOCX, MD или TXT файлы
+            </p>
           </div>
         ) : (
-          documents.map(doc => (
-            <div
-              key={doc.id}
-              className="bg-gray-900 border border-gray-800 rounded-xl p-4 flex items-start justify-between hover:border-gray-700 transition-colors"
-            >
-              <div className="flex-1">
-                <div className="flex items-center gap-3 mb-1 flex-wrap">
-                  <span className="text-white font-medium">{doc.title}</span>
-                  <span className={`text-xs px-2 py-0.5 rounded-full ${statusColors[doc.status] || "bg-gray-700 text-gray-400"}`}>
-                    {statusLabels[doc.status] || doc.status}
-                  </span>
-                  <span className="text-xs bg-gray-800 text-gray-400 px-2 py-0.5 rounded-full uppercase">
-                    {doc.file_type || "—"}
-                  </span>
-                  {doc.source === "agent" && (
-                    <span className="text-xs bg-purple-500/20 text-purple-400 px-2 py-0.5 rounded-full">🤖 Агент</span>
-                  )}
-                </div>
-                {doc.description && <p className="text-gray-400 text-sm">{doc.description}</p>}
-                {doc.tags && <p className="text-gray-500 text-xs mt-1">🏷 {doc.tags}</p>}
-                <p className="text-gray-600 text-xs mt-1">
-                  {new Date(doc.created_at).toLocaleString("ru-RU")}
-                </p>
+          visibleRows.map(r => (
+            <div key={r.id} className="grid grid-cols-1 lg:grid-cols-6 items-start px-6 py-5 border-t border-gray-800 hover:bg-gray-850 transition-colors">
+              <div className="pt-1">
+                <input
+                  type="checkbox"
+                  checked={!!selected[r.relPath]}
+                  onChange={() => toggle(r.relPath)}
+                  className="w-5 h-5 rounded border-gray-600 focus:ring-blue-500 focus:ring-2"
+                />
               </div>
-              <button
-                onClick={() => handleDelete(doc.id)}
-                className="ml-4 text-gray-600 hover:text-red-400 transition-colors text-sm"
-              >
-                ✕
-              </button>
+              
+              <div className="font-mono min-w-0">
+                <div className="text-white truncate font-medium mb-1" title={r.relPath}>{r.relPath}</div>
+                <div className="text-gray-500 text-xs">{r.ext.toUpperCase()} | {r.sha256.slice(0, 12)}...</div>
+              </div>
+              
+              <div className="text-sm text-gray-300 font-mono">{fmtSize(r.size)}</div>
+              
+              <span className={badgeClass(r.status)}>
+                {r.status}
+              </span>
+              
+              <div className="text-center">
+                <a 
+                  href={`/api/library/file/${encodeURIComponent(r.relPath)}`}
+                  className="text-blue-400 hover:text-blue-300 text-lg transition-colors p-1 -m-1 rounded hover:bg-blue-900/30 block"
+                  title="Скачать файл"
+                >
+                  📥
+                </a>
+              </div>
+              
+              <div className="text-xs text-gray-500 leading-tight">
+                {r.status === 'DUPLICATE' && `Дубликат: ${r.duplicateOf}`}
+                {r.status === 'EMPTY' && 'Файл пустой'}
+                {r.status === 'TOO_LARGE' && 'Слишком большой (>50MB)'}
+                {r.status === 'UNSUPPORTED_EXT' && 'Неподдерживаемый тип'}
+                {r.status === 'OK' && <span className="text-green-400">✓ Готов к использованию</span>}
+              </div>
             </div>
           ))
         )}
