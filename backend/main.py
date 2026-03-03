@@ -1,9 +1,13 @@
 from dotenv import load_dotenv
-load_dotenv()  # Загружает переменные из .env
+load_dotenv()  # Загружаем переменные из .env
 
 from fastapi import FastAPI
 from routers import agents, library
+from db import engine, Base
 import logging
+
+# Создание таблиц (для разработки)
+Base.metadata.create_all(bind=engine)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
