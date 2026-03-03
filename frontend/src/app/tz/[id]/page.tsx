@@ -1,236 +1,168 @@
-'use client';
+'use client'
 
-import * as React from 'react';
+import React, { useEffect, useState } from 'react'
+import { useParams } from 'next/navigation'
 
-type TzSection = {
-  id: string;
-  title: string;
-  content: string;
-  order_index: number;
-};
+interface Section {
+  id: number
+  title: string
+  content: string
+  order_index: number
+}
 
-type TzDetail = {
-  id: string;
-  title: string;
-  version: number;
-  status: string;
-  created_at: string;
-  sections: TzSection[];
-};
+interface TZ {
+  id: number
+  title: string
+  version: string
+  status: string
+  created_at: string
+  sections: Section[]
+}
 
-type PageProps = {
-  params: Promise<{ id: string }>;
-};
+export default function TZDetailPage() {
+  const params = useParams()
+  const id = params.id as string
+  const [tz, setTz] = useState<TZ | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [validationResult, setValidationResult] = useState<string | null>(null)
+  const [validating, setValidating] = useState(false)
 
-export default function TZDetailPage({ params }: PageProps) {
-  // Next.js: params is a Promise -> unwrap with React.use() in Client Component
-  const { id } = React.use(params); // [web:716]
+  useEffect(() => {
+    fetch(`/api/agents/tz/${id}`)
+      .then(res => res.json())
+      .then(data => {
+        // Если секции не пришли, устанавливаем пустой массив
+        if (!data.sections) {
+          data.sections = []
+        }
+        setTz(data)
+        setLoading(false)
+      })
+      .catch(err => {
+        console.error('Ошибка загрузки ТЗ:', err)
+        setLoading(false)
+      })
+  }, [id])
 
-  const [data, setData] = React.useState<TzDetail | null>(null);
-  const [loading, setLoading] = React.useState(true);
-  const [err, setErr] = React.useState('');
+  const handleCopyJSON = () => {
+    if (!tz) return
+    navigator.clipboard.writeText(JSON.stringify(tz, null, 2))
+    alert('JSON скопирован в буфер обмена')
+  }
 
-  const [remarks, setRemarks] = React.useState('');
-  const [creatingVersion, setCreatingVersion] = React.useState(false);
+  const handleDownloadMD = () => {
+    if (!tz) return
+    let md = `# ${tz.title}\n\n`
+    md += `**Версия:** ${tz.version}  \n`
+    md += `**Статус:** ${tz.status}  \n`
+    md += `**Создано:** ${new Date(tz.created_at).toLocaleString('ru-RU')}\n\n`
+    // Сортируем секции, если они есть
+    if (tz.sections && tz.sections.length > 0) {
+      tz.sections.sort((a, b) => a.order_index - b.order_index).forEach(section => {
+        md += `## ${section.title}\n\n`
+        md += `${section.content}\n\n`
+      })
+    } else {
+      md += '*Нет разделов*\n\n'
+    }
+    const blob = new Blob([md], { type: 'text/markdown' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${tz.title.replace(/\s+/g, '_')}.md`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
 
-  const loadTz = React.useCallback(async () => {
-    setLoading(true);
-    setErr('');
+  const handleValidate = async () => {
+    if (!tz) return
+    setValidating(true)
+    setValidationResult(null)
     try {
-      const res = await fetch(`/api/agents/tz/${id}`, { cache: 'no-store' });
-      const text = await res.text();
-      let payload: any = null;
-      try {
-        payload = text ? JSON.parse(text) : null;
-      } catch {
-        payload = { raw: text };
+      // Собираем полный текст ТЗ (если секций нет, используем только заголовок)
+      let fullContent = tz.title
+      if (tz.sections && tz.sections.length > 0) {
+        fullContent = tz.sections.map(s => `${s.title}\n${s.content}`).join('\n\n')
       }
-      if (!res.ok) throw new Error(payload?.detail || payload?.message || text || `HTTP ${res.status}`);
-      setData(payload);
-    } catch (e: any) {
-      setErr(e?.message ?? String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [id]);
-
-  React.useEffect(() => {
-    loadTz();
-  }, [loadTz]);
-
-  const copyText = async (text: string) => {
-    await navigator.clipboard.writeText(text);
-    alert('Скопировано в буфер обмена');
-  };
-
-  const exportMarkdown = () => {
-    if (!data) return;
-    const sorted = [...(data.sections || [])].sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0));
-    const md =
-      `# ${data.title}\n\n` +
-      `ID: ${data.id}\n\n` +
-      `Версия: ${data.version} | Статус: ${data.status} | Создано: ${data.created_at}\n\n` +
-      sorted.map((s) => `## ${s.title}\n\n${s.content}\n`).join('\n');
-
-    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `TZ_${data.id}_v${data.version}.md`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-
-    URL.revokeObjectURL(url);
-  };
-
-  const createV2 = async () => {
-    if (!data) return;
-    if (!remarks.trim()) {
-      alert('Введи промт/замечания для новой версии.');
-      return;
-    }
-
-    setCreatingVersion(true);
-    setErr('');
-    try {
-      const newTitle = `v${data.version + 1}. Правки к ТЗ "${data.title}" (id=${data.id}): ${remarks.trim()}`;
-
-      const res = await fetch('/api/agents/design', {
+      const response = await fetch('/api/agents/validate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: newTitle }),
-      });
-
-      const text = await res.text();
-      let payload: any = null;
-      try {
-        payload = text ? JSON.parse(text) : null;
-      } catch {
-        payload = null;
-      }
-
-      if (!res.ok) throw new Error(payload?.detail || payload?.message || text || `HTTP ${res.status}`);
-
-      // Если backend вернул новый spec id — откроем его сразу, иначе вернёмся на список
-      const newId = payload?.id || payload?.spec_id || payload?.tz_id;
-      if (newId) {
-        window.location.href = `/tz/${newId}`;
-      } else {
-        window.location.href = `/tz`;
-      }
-    } catch (e: any) {
-      setErr(e?.message ?? String(e));
+        body: JSON.stringify({ tz_content: fullContent })
+      })
+      if (!response.ok) throw new Error('Ошибка валидации')
+      const data = await response.json()
+      setValidationResult(data.analysis)
+    } catch (err) {
+      console.error(err)
+      setValidationResult('Произошла ошибка при проверке. Попробуйте позже.')
     } finally {
-      setCreatingVersion(false);
+      setValidating(false)
     }
-  };
+  }
 
-  const sections = data?.sections ? [...data.sections].sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0)) : [];
+  if (loading) {
+    return <div className="text-gray-400">Загрузка...</div>
+  }
+
+  if (!tz) {
+    return <div className="text-red-400">ТЗ не найдено</div>
+  }
 
   return (
-    <div className="max-w-6xl mx-auto">
-      <a href="/tz" className="text-blue-400 hover:text-blue-300 text-sm mb-4 inline-block">
-        ← Назад к списку ТЗ
-      </a>
+    <div className="max-w-4xl mx-auto py-8 px-4">
+      <div className="flex justify-between items-start mb-6">
+        <div>
+          <h1 className="text-3xl font-bold text-white">{tz.title}</h1>
+          <div className="flex gap-4 mt-2 text-sm text-gray-400">
+            <span>Версия: {tz.version}</span>
+            <span>Статус: {tz.status}</span>
+            <span>Создано: {new Date(tz.created_at).toLocaleString('ru-RU')}</span>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={handleCopyJSON}
+            className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm"
+          >
+            Копировать JSON
+          </button>
+          <button
+            onClick={handleDownloadMD}
+            className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm"
+          >
+            Скачать .md
+          </button>
+          <button
+            onClick={handleValidate}
+            disabled={validating}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-800 rounded-lg text-sm flex items-center gap-2"
+          >
+            {validating ? 'Проверка...' : 'Проверить на ГОСТ'}
+          </button>
+        </div>
+      </div>
 
-      {loading && <div className="text-gray-400 p-6">Загрузка ТЗ {id}…</div>}
-
-      {err && (
-        <div className="text-sm text-red-300 bg-red-950/40 border border-red-900 rounded-lg p-3 mb-6">
-          Ошибка: {err}
+      {validationResult && (
+        <div className="mt-6 p-4 bg-gray-800 rounded-xl border border-gray-700">
+          <h2 className="text-xl font-semibold text-white mb-3">Результат проверки</h2>
+          <pre className="text-gray-300 whitespace-pre-wrap font-sans text-sm">
+            {validationResult}
+          </pre>
         </div>
       )}
 
-      {!loading && data && (
-        <>
-          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 mb-6">
-            <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
-              <div>
-                <h1 className="text-2xl font-bold text-white mb-2">{data.title}</h1>
-                <div className="text-xs text-gray-500">
-                  id: <span className="text-gray-300">{data.id}</span> | status:{' '}
-                  <span className="text-gray-300">{data.status}</span> | version:{' '}
-                  <span className="text-gray-300">{data.version}</span> | created:{' '}
-                  <span className="text-gray-300">{new Date(data.created_at).toLocaleString()}</span>
-                </div>
-              </div>
-
-              <div className="flex gap-2">
-                <button
-                  onClick={() => copyText(JSON.stringify(data, null, 2))}
-                  className="bg-gray-800 hover:bg-gray-700 text-white rounded-lg px-4 py-2 border border-gray-700"
-                >
-                  Копировать JSON
-                </button>
-                <button
-                  onClick={exportMarkdown}
-                  className="bg-blue-600 hover:bg-blue-700 text-white rounded-lg px-4 py-2 font-medium"
-                >
-                  Скачать .md
-                </button>
-              </div>
+      <div className="space-y-6 mt-8">
+        {tz.sections && tz.sections.length > 0 ? (
+          tz.sections.sort((a, b) => a.order_index - b.order_index).map((section) => (
+            <div key={section.id} className="bg-gray-800 rounded-xl p-6 border border-gray-700">
+              <h2 className="text-xl font-semibold text-white mb-3">{section.title}</h2>
+              <div className="text-gray-300 whitespace-pre-wrap">{section.content}</div>
             </div>
-          </div>
-
-          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 mb-6">
-            <h2 className="text-lg font-semibold text-white mb-4">Разделы</h2>
-
-            {sections.length === 0 ? (
-              <div className="text-gray-400">Разделов нет (sections пустой).</div>
-            ) : (
-              <div className="space-y-4">
-                {sections.map((sec) => (
-                  <div key={sec.id} className="border border-gray-800 rounded-lg p-4">
-                    <div className="flex justify-between items-start gap-3">
-                      <h3 className="text-white font-semibold">{sec.title}</h3>
-                      <button
-                        onClick={() => copyText(sec.content)}
-                        className="text-xs text-blue-400 hover:text-blue-300"
-                      >
-                        Копировать раздел
-                      </button>
-                    </div>
-                    <div className="text-sm text-gray-300 whitespace-pre-wrap mt-2">{sec.content}</div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          <div className="bg-gray-900 border border-gray-800 rounded-xl p-6">
-            <h2 className="text-lg font-semibold text-white mb-2">Новая версия ТЗ</h2>
-            <div className="text-gray-400 text-sm mb-3">
-              Пиши правки “человеческим языком”. Пример: “Добавь раздел ‘Состав поставки’, уточни перегрузочную способность, приведи требования к охлаждению по ГОСТ 18142.1-85”.
-            </div>
-
-            <textarea
-              value={remarks}
-              onChange={(e) => setRemarks(e.target.value)}
-              className="w-full bg-gray-800 border border-gray-700 text-white rounded-lg px-3 py-2 min-h-28 mb-3 outline-none focus:border-blue-500"
-              placeholder="Замечания / промт..."
-            />
-
-            <div className="flex gap-2">
-              <button
-                onClick={createV2}
-                disabled={creatingVersion}
-                className="bg-green-600 hover:bg-green-700 disabled:bg-green-900 text-white rounded-lg px-6 py-2 font-medium"
-              >
-                {creatingVersion ? 'Создаю…' : 'Создать v2'}
-              </button>
-
-              <button
-                onClick={loadTz}
-                className="bg-gray-800 hover:bg-gray-700 text-white rounded-lg px-4 py-2 border border-gray-700"
-              >
-                Обновить ТЗ
-              </button>
-            </div>
-          </div>
-        </>
-      )}
+          ))
+        ) : (
+          <div className="text-gray-400 italic">Нет разделов для отображения</div>
+        )}
+      </div>
     </div>
-  );
+  )
 }

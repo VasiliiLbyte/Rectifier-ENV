@@ -1,0 +1,204 @@
+import os
+import json
+import logging
+from pathlib import Path
+from typing import Dict, Any, List
+from openai import OpenAI
+
+# Для чтения разных форматов
+try:
+    from pypdf import PdfReader
+except ImportError:
+    PdfReader = None
+try:
+    from docx import Document
+except ImportError:
+    Document = None
+
+logger = logging.getLogger(__name__)
+
+# Инициализация OpenAI
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Пути
+BASE_DIR = Path(__file__).parent.parent.parent  # rectifier-env/
+LIBRARY_DIR = BASE_DIR / "library"
+MANIFEST_PATH = os.getenv("VALIDATION_MANIFEST_PATH", str(BASE_DIR / "validated_manifest.json"))
+
+
+def safe_str(obj) -> str:
+    """Преобразует объект в строку, гарантируя отсутствие проблем с кодировкой."""
+    try:
+        return str(obj)
+    except UnicodeEncodeError:
+        return repr(obj).encode('ascii', errors='ignore').decode('ascii')
+
+
+def load_manifest() -> Dict[str, Any]:
+    """Загружает манифест."""
+    if not os.path.exists(MANIFEST_PATH):
+        logger.warning(f"Манифест не найден: {MANIFEST_PATH}")
+        return {"selected": []}
+    try:
+        with open(MANIFEST_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Ошибка чтения манифеста: {safe_str(e)}")
+        return {"selected": []}
+
+
+def read_text_file(file_path: Path) -> str:
+    """Читает текстовый файл (utf-8)."""
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception as e:
+        logger.error(f"Ошибка чтения текстового файла {file_path}: {safe_str(e)}")
+        return ""
+
+
+def read_pdf_file(file_path: Path) -> str:
+    """Читает PDF и возвращает текст."""
+    if PdfReader is None:
+        logger.error("pypdf не установлен, PDF не читается")
+        return ""
+    try:
+        reader = PdfReader(str(file_path))
+        text = []
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text.append(page_text)
+        return "\n".join(text)
+    except Exception as e:
+        logger.error(f"Ошибка чтения PDF {file_path}: {safe_str(e)}")
+        return ""
+
+
+def read_docx_file(file_path: Path) -> str:
+    """Читает DOCX и возвращает текст."""
+    if Document is None:
+        logger.error("python-docx не установлен, DOCX не читается")
+        return ""
+    try:
+        doc = Document(str(file_path))
+        return "\n".join([para.text for para in doc.paragraphs])
+    except Exception as e:
+        logger.error(f"Ошибка чтения DOCX {file_path}: {safe_str(e)}")
+        return ""
+
+
+def read_file_content(rel_path: str) -> str:
+    """Читает содержимое файла по относительному пути."""
+    full_path = LIBRARY_DIR / rel_path
+    if not full_path.exists():
+        logger.error(f"Файл не существует: {full_path}")
+        return ""
+
+    suffix = full_path.suffix.lower()
+    if suffix in (".txt", ".md"):
+        return read_text_file(full_path)
+    elif suffix == ".pdf":
+        return read_pdf_file(full_path)
+    elif suffix == ".docx":
+        return read_docx_file(full_path)
+    else:
+        logger.warning(f"Неподдерживаемый формат: {suffix}")
+        return ""
+
+
+def generate_tz(user_prompt: str) -> str:
+    """Генерирует ТЗ на основе выбранных документов."""
+    logger.info("=== Генерация ТЗ ===")
+    manifest = load_manifest()
+    selected_files = manifest.get("selected", [])
+    logger.info(f"Выбрано файлов: {len(selected_files)}")
+
+    docs_content = []
+    for rel_path in selected_files:
+        logger.info(f"Чтение файла: {rel_path}")
+        content = read_file_content(rel_path)
+        if content:
+            if len(content) > 10000:
+                content = content[:10000] + "\n...[обрезано]"
+            docs_content.append(f"--- {rel_path} ---\n{content}")
+        else:
+            logger.warning(f"Файл {rel_path} пуст или не прочитан")
+
+    documents_text = "\n\n".join(docs_content) if docs_content else "Нет выбранных документов."
+
+    system_prompt = """Ты — эксперт по разработке технических заданий (ТЗ) на промышленное оборудование, особенно выпрямители и силовая электроника. 
+Твоя задача — составить детальное ТЗ на основе предоставленных документов (ГОСТы, стандарты, технические условия) и запроса пользователя.
+
+Используй только информацию из приложенных документов. Если в документах нет нужных данных, опирайся на общеизвестные требования, но явно укажи, что они не из предоставленных источников.
+
+Формат ТЗ должен быть структурированным, с разделами: 
+1. Общие сведения
+2. Назначение и цели создания
+3. Характеристики объекта
+4. Требования к видам обеспечения
+5. Состав и содержание работ
+6. Порядок контроля и приемки
+7. Требования к документированию"""
+
+    try:
+        logger.info("Запрос к OpenAI (generate_tz)...")
+        response = client.chat.completions.create(
+            model="gpt-4-turbo",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Документы:\n{documents_text}\n\nЗапрос: {user_prompt}"}
+            ],
+            temperature=0.3,
+            max_tokens=4000
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.exception("Ошибка OpenAI в generate_tz")
+        # Формируем безопасное сообщение об ошибке
+        error_msg = safe_str(e)
+        return f"Ошибка генерации ТЗ: {error_msg}"
+
+
+def validate_tz(tz_content: str) -> str:
+    """Проверяет ТЗ на соответствие документам."""
+    logger.info("=== Валидация ТЗ ===")
+    manifest = load_manifest()
+    selected_files = manifest.get("selected", [])
+    logger.info(f"Выбрано файлов: {len(selected_files)}")
+
+    docs_content = []
+    for rel_path in selected_files:
+        logger.info(f"Чтение файла: {rel_path}")
+        content = read_file_content(rel_path)
+        if content:
+            if len(content) > 15000:
+                content = content[:15000] + "\n...[обрезано]"
+            docs_content.append(f"--- {rel_path} ---\n{content}")
+        else:
+            logger.warning(f"Файл {rel_path} пуст или не прочитан")
+
+    documents_text = "\n\n".join(docs_content) if docs_content else "Нет выбранных документов."
+
+    system_prompt = """Ты — эксперт по техническим заданиям на промышленное оборудование. 
+Проверь предоставленное ТЗ на соответствие приложенным документам (ГОСТы, стандарты). 
+Выяви все несоответствия, отсутствующие требования или ошибки. 
+Дай конкретные замечания по каждому пункту и рекомендации по исправлению.
+Формат ответа: список замечаний с указанием раздела ТЗ и ссылкой на документ (если применимо)."""
+
+    try:
+        logger.info("Запрос к OpenAI (validate_tz)...")
+        response = client.chat.completions.create(
+            model="gpt-4-turbo",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Документы:\n{documents_text}\n\nТЗ для проверки:\n{tz_content}"}
+            ],
+            temperature=0.2,
+            max_tokens=2000
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.exception("Ошибка OpenAI в validate_tz")
+        error_msg = safe_str(e)
+        return f"Ошибка при валидации: {error_msg}"
