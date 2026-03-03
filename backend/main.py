@@ -1,8 +1,8 @@
 from dotenv import load_dotenv
-load_dotenv()  # Загружаем переменные из .env
+load_dotenv()
 
 from fastapi import FastAPI
-from routers import agents, library
+from routers import agents, library, validation
 from db import engine, Base
 import logging
 
@@ -16,6 +16,7 @@ app = FastAPI(title="Rectifier-ENV Backend", version="1.0")
 
 app.include_router(agents.router)
 app.include_router(library.router)
+app.include_router(validation.router)
 
 @app.get("/")
 async def root():
