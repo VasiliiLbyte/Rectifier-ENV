@@ -1,7 +1,8 @@
+from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 import logging
 from datetime import datetime
 
@@ -144,3 +145,89 @@ async def validate_tz_endpoint(request: ValidateRequest):
     except Exception as e:
         logger.exception("Ошибка в /validate")
         raise HTTPException(status_code=500, detail=str(e))
+
+from openai import OpenAI
+from agents.document_collector import DocumentCollector
+
+class CollectRequest(BaseModel):
+    query: str
+    max_sources: Optional[int] = 10
+
+class CollectResponse(BaseModel):
+    query: str
+    sources_found: int
+    documents_saved: int
+    perplexity_response: str
+
+@router.post("/collect", response_model=CollectResponse)
+async def collect_documents(request: CollectRequest):
+    """
+    Запускает сбор документов по запросу и сохраняет их в библиотеку
+    """
+    try:
+        collector = DocumentCollector()
+        result = collector.collect_by_query(
+            query=request.query,
+            max_sources=request.max_sources
+        )
+        return CollectResponse(
+            query=result["query"],
+            sources_found=result["sources_found"],
+            documents_saved=result["documents_saved"],
+            perplexity_response=result["perplexity_response"]
+        )
+    except Exception as e:
+        logger.exception("Ошибка в /collect")
+        raise HTTPException(status_code=500, detail=str(e))
+
+class ApiStatusResponse(BaseModel):
+    perplexity: bool
+    tavily: bool
+    openai: bool
+
+@router.get("/status", response_model=ApiStatusResponse)
+async def check_api_status():
+    """
+    Проверяет доступность API ключей
+    """
+    from openai import OpenAI
+    import os
+
+    status = {
+        "perplexity": False,
+        "tavily": False,
+        "openai": False
+    }
+
+    # Проверка Perplexity
+    try:
+        client = Perplexity(api_key=os.getenv("PERPLEXITY_API_KEY"))
+        # Простой тестовый запрос
+        client.chat.completions.create(
+            messages=[{"role": "user", "content": "test"}],
+            model="sonar",
+            stream=False,
+            max_tokens=5
+        )
+        status["perplexity"] = True
+    except Exception:
+        pass
+
+    # Проверка Tavily
+    try:
+        from tavily import TavilyClient
+        client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+        client.search("test", max_results=1)
+        status["tavily"] = True
+    except Exception:
+        pass
+
+    # Проверка OpenAI
+    try:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        client.models.list()
+        status["openai"] = True
+    except Exception:
+        pass
+
+    return ApiStatusResponse(**status)

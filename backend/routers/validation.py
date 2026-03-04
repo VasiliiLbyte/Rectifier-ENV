@@ -1,6 +1,7 @@
 import os
 import json
 import hashlib
+import time
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -20,12 +21,16 @@ class FileInfo(BaseModel):
     size: int
     sha256: str
     status: str  # OK, EMPTY, TOO_LARGE, UNSUPPORTED_EXT, DUPLICATE
+    created: float  # timestamp создания/модификации
+    ext: str        # расширение файла
 
 class ScanResponse(BaseModel):
     files: List[FileInfo]
     total: int
     ok_count: int
     duplicate_count: int
+    total_size: int   # общий размер всех файлов в байтах
+    root: str
 
 class ManifestUpdate(BaseModel):
     selected: List[str]
@@ -52,6 +57,7 @@ async def scan_library():
         name = file_path.name
         size = file_path.stat().st_size
         ext = file_path.suffix.lower()
+        created = file_path.stat().st_mtime  # время последнего изменения
         
         # Определяем статус
         if size == 0:
@@ -71,7 +77,6 @@ async def scan_library():
             # Проверка на дубликат
             if hash_hex in sha_map:
                 status = "DUPLICATE"
-                # можно сохранить оригинал для информации
             else:
                 status = "OK"
                 sha_map[hash_hex] = rel_path
@@ -81,19 +86,24 @@ async def scan_library():
             name=name,
             size=size,
             sha256=hash_hex if 'hash_hex' in locals() else "",
-            status=status
+            status=status,
+            created=created,
+            ext=ext.lstrip('.')  # убираем точку
         ))
     
     # Подсчёт статистики
     total = len(files_info)
     ok_count = sum(1 for f in files_info if f.status == "OK")
     duplicate_count = sum(1 for f in files_info if f.status == "DUPLICATE")
+    total_size = sum(f.size for f in files_info)  # ВАЖНО: добавляем общий размер
     
     return ScanResponse(
         files=files_info,
         total=total,
         ok_count=ok_count,
-        duplicate_count=duplicate_count
+        duplicate_count=duplicate_count,
+        total_size=total_size,
+        root=str(LIBRARY_DIR)
     )
 
 @router.get("/manifest", response_model=Dict[str, Any])
